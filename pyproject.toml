@@ -1,9 +1,10 @@
 [project]
 name = "eyego-tracker"
 version = "0.1.0"
-description = "Add your description here"
+description = "Real-time single-object tracker using OpenCV CSRT and YOLO-assisted verification"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
-    "opencv-contrib-python>=5.0.0.93",
+    "opencv-contrib-python==4.10.0.84",
+    "ultralytics>=8.4.146",
 ]

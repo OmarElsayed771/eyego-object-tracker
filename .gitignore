@@ -8,3 +8,31 @@ wheels/
 
 # Virtual environments
 .venv
+
+
+# Logs
+*.log
+logs/
+
+# Local data
+data/
+outputs/
+
+
+# Test/cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+
+# YOLO model
+*.pt
