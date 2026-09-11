@@ -1,27 +1,30 @@
 # EyeGo Real-Time Object Tracker
 
-A real-time single-object tracking system built with **OpenCV CSRT** and **YOLO-assisted verification**.
+A real-time single-object tracking system built with **OpenCV CSRT** and **YOLO-assisted verification and recovery**.
 
 ## Overview
 
-The application allows a user to select an arbitrary object from the first webcam frame and track that specific object in real time.
+The application allows a user to select an object from the first webcam frame using a bounding box.
 
-The selected object remains the target throughout the session. The system **does not switch to another object** if the original target disappears.
+The system then uses the **CSRT tracker** to follow the selected object in real time.
+
+To improve tracking robustness, **YOLO11n** periodically verifies the CSRT tracking result by comparing the tracked bounding box with YOLO detections belonging to the originally identified object class.
+
+If repeated verification failures occur, the system attempts to **recover the tracker using the best matching YOLO detection**.
 
 ## Features
 
 * Manual target selection using a bounding box
 * Real-time CSRT tracking
-* Target appearance verification
-* Optional YOLO-based verification
+* YOLO11n target-class identification
+* Periodic YOLO verification
+* Class-aware YOLO verification
 * IoU-based geometric validation
-* Target-class-aware YOLO verification
 * Consecutive verification failure handling
-* Target-lost state without switching identity
-* FPS monitoring
-* Target re-selection
-* OpenCV compatibility handling
-* Automated unit tests for bounding-box IoU
+* Automatic tracker recovery using YOLO detections
+* Protection against unrelated object classes during verification
+* OpenCV CSRT compatibility handling
+* Lightweight real-time webcam processing
 
 ## Architecture
 
@@ -34,15 +37,11 @@ The selected object remains the target throughout the session. The system **does
                             v
                     User Selects Target
                             |
-              +-------------+-------------+
-              |                           |
-              v                           v
-       Target Appearance                YOLO
-              |                           |
-              |                    Optional Class
-              |                     Identification
-              |                           |
-              +-------------+-------------+
+                            v
+                           YOLO
+                            |
+                            v
+                 Identify Target Class
                             |
                             v
                           CSRT
@@ -51,62 +50,183 @@ The selected object remains the target throughout the session. The system **does
                   Frame-by-Frame Tracking
                             |
                             v
-                  Periodic Verification
-                            |
-                    +-------+-------+
-                    |               |
-                    v               v
-             Appearance           YOLO
-              Similarity          + IoU
-                    |               |
-                    +-------+-------+
+                   Periodic YOLO Check
                             |
                             v
-                    Target Validation
+              Filter by Target Class
                             |
-                    +-------+-------+
-                    |               |
-                    v               v
-                  Valid          Repeated
-                                 Failure
-                    |               |
-                    v               v
-                Continue       TARGET LOST
+                            v
+                    Calculate IoU
+                            |
+                  +---------+---------+
+                  |                   |
+                  v                   v
+              IoU >= 0.30         IoU < 0.30
+                  |                   |
+                  v                   v
+              VERIFIED            UNCERTAIN
+                  |                   |
+                  |              Failure Count +1
+                  |                   |
+                  +---------+---------+
+                            |
+                            v
+                  Repeated Failures?
+                            |
+                     +------+------+
+                     |             |
+                    No            Yes
+                     |             |
+                     v             v
+                 Continue       Recovery
+                                   |
+                            +------+------+
+                            |             |
+                            v             v
+                       YOLO Detection   No Detection
+                            |             |
+                            v             v
+                     Reinitialize CSRT  Recovery Failed
+                            |
+                            v
+                         Continue
 ```
 
 ## Why CSRT + YOLO?
 
-**CSRT** is used as the primary tracker because the task requires tracking a single user-selected object in real time.
+**CSRT** is used as the primary tracker because it is designed for single-object tracking and can efficiently follow a user-selected target frame by frame.
 
-**YOLO** is used as an auxiliary detection and verification mechanism rather than as the primary tracker.
+However, a tracker can sometimes drift or lose the target. Therefore, **YOLO11n** is used as an auxiliary verification and recovery mechanism.
 
-This separation is important because YOLO does not inherently know which instance of an object the user selected.
+YOLO periodically detects objects in the current frame. The system then:
 
-For example, if the user selects one person among several people, YOLO can detect the `person` class, but it does not automatically identify the exact person selected by the user.
+1. Filters detections using the target class identified during initialization.
+2. Compares the YOLO detections with the current CSRT bounding box.
+3. Calculates **Intersection over Union (IoU)**.
+4. Uses the IoU result to determine whether the tracker is likely still following the intended object.
+5. Attempts recovery if repeated verification failures occur.
 
-Therefore, the **user's initial selection remains the source of target identity**.
+This combination provides a balance between **fast tracking** and **periodic detection-based correction**.
 
-## Target Identity
+## Target Identification
 
-The system stores an appearance representation of the selected object and uses it to help determine whether the tracker is still following the original target.
+When the user selects the target in the first frame, YOLO is also executed on that frame.
 
-If the target disappears, the system reports:
+The system compares the user's selected bounding box with YOLO detections and selects the detection with the highest IoU.
+
+The corresponding YOLO class becomes the target class.
+
+For example:
 
 ```text
-TARGET LOST - NO SWITCH
+User selects object
+        |
+        v
+      YOLO
+        |
+        v
++-------------------+
+| person            |
+| bottle            |
+| chair             |
++-------------------+
+        |
+        v
+Highest IoU with
+user selection
+        |
+        v
+Target Class = person
 ```
 
-instead of automatically switching to another visible object.
+If YOLO cannot identify the selected object, the system continues with **CSRT-only tracking**.
 
-This prevents **identity switching**, which is especially important when multiple similar objects are present in the scene.
+## YOLO Verification
+
+YOLO does not run on every frame.
+
+Instead, verification is performed every:
+
+```text
+10 frames
+```
+
+This reduces computational overhead while still providing periodic validation.
+
+Only detections belonging to the **original target class** are considered.
+
+For example, if the selected target was identified as `person`, detections belonging to other classes are ignored.
+
+The system then calculates IoU between:
+
+* The current CSRT bounding box
+* The best matching YOLO detection
+
+The current configuration uses:
+
+```python
+IOU_THRESHOLD = 0.30
+```
+
+An IoU greater than or equal to `0.30` is considered a successful verification.
+
+## Tracker Recovery
+
+If the system experiences repeated verification failures, it attempts to recover the CSRT tracker.
+
+The current configuration allows:
+
+```python
+MAX_VERIFICATION_FAILURES = 3
+```
+
+When the threshold is reached:
+
+1. The system searches for a valid YOLO detection belonging to the original target class.
+2. The best matching detection is selected.
+3. CSRT is reinitialized using that detection's bounding box.
+4. The verification failure counter is reset.
+
+Example:
+
+```text
+CSRT Tracking
+      |
+      v
+Verification Failure
+      |
+      v
+Failure Counter
+      |
+      v
+3 Consecutive Failures
+      |
+      v
+YOLO Detection
+      |
+      v
+Valid Detection?
+   /          \
+ Yes           No
+  |             |
+  v             v
+Recover      Recovery Failed
+CSRT
+```
+
+If no valid YOLO detection is available, the system reports:
+
+```text
+RECOVERY FAILED: NO VALID DETECTION
+```
 
 ## Technologies
 
-* Python 3.10+
-* OpenCV
-* OpenCV CSRT Tracker
-* Ultralytics YOLO
-* uv
+* **Python 3.10+**
+* **OpenCV**
+* **OpenCV CSRT Tracker**
+* **Ultralytics YOLO11n**
+* **uv**
 
 ## Installation
 
@@ -120,13 +240,13 @@ This prevents **identity switching**, which is especially important when multipl
 ### Clone the Repository
 
 ```bash
-git clone <YOUR_GITHUB_REPOSITORY_URL>
+git clone <https://github.com/OmarElsayed771/eyego-object-tracker.git>
 cd EyeGo_Tracker
 ```
 
-### Create Environment and Install Dependencies
+### Install Dependencies
 
-The project uses `uv` to create and manage the virtual environment and install dependencies.
+The project uses `uv` for environment and dependency management.
 
 ```bash
 uv sync
@@ -134,63 +254,112 @@ uv sync
 
 ## Run
 
-Start the tracker with:
+Start the application with:
 
 ```bash
 uv run main.py
 ```
 
-During startup, draw a bounding box around the object you want to track and press **ENTER** or **SPACE** to confirm the selection.
+When the application starts:
+
+1. The webcam is opened.
+2. The first frame is displayed.
+3. Select the object you want to track.
+4. Press **ENTER** or **SPACE** to confirm.
+5. CSRT starts tracking the selected object.
+6. YOLO periodically verifies the tracking result.
 
 ## Controls
 
-| Key | Action              |
-| --- | ------------------- |
-| `Q` | Quit                |
-| `R` | Select a new target |
+| Key | Action |
+| --- | ------ |
+| `Q` | Quit   |
+
+During target selection:
+
+| Key     | Action            |
+| ------- | ----------------- |
+| `ENTER` | Confirm selection |
+| `SPACE` | Confirm selection |
+| `C`     | Cancel selection  |
 
 ## Implementation Details
 
 ### 1. Target Selection
 
-The first webcam frame is displayed and the user selects the target using OpenCV's ROI selector.
+The first webcam frame is captured and displayed using OpenCV's ROI selector.
 
-The selected bounding box defines the initial target identity.
+The user manually draws a bounding box around the object they want to track.
 
-### 2. CSRT Tracking
-
-The **CSRT tracker** tracks the selected object frame by frame and provides an updated bounding box.
-
-CSRT is responsible for the primary real-time tracking process.
-
-### 3. Appearance Verification
-
-An **HSV color histogram** is extracted from the initial target region.
-
-The histogram is then compared with the currently tracked region to help detect potential tracking drift.
-
-### 4. YOLO Verification
-
-YOLO runs periodically rather than on every frame to reduce computational overhead.
-
-When YOLO can identify the target class, its detections are compared with the current CSRT bounding box using **Intersection over Union (IoU)**.
-
-The YOLO result is used as a verification signal, not as the source of target identity.
-
-### 5. Target Loss
-
-Several consecutive verification failures are required before the system declares the target lost.
-
-When the target is lost, the system intentionally **does not switch to another object**.
-
-The tracker enters the:
-
-```text
-TARGET LOST - NO SWITCH
+```python
+user_roi = cv2.selectROI(
+    "Select Target",
+    frame,
+    fromCenter=False,
+    showCrosshair=True,
+)
 ```
 
-state until the user manually selects a new target.
+### 2. Target Class Identification
 
+YOLO11n is executed on the first frame.
+
+The system calculates IoU between the selected ROI and each YOLO detection.
+
+The detection with the highest IoU determines the target class.
+
+### 3. CSRT Tracking
+
+The selected ROI is passed to the CSRT tracker.
+
+```python
+tracker = create_csrt_tracker()
+tracker.init(frame, user_roi)
+```
+
+CSRT then provides an updated bounding box for each incoming webcam frame.
+
+### 4. Periodic YOLO Verification
+
+Every `YOLO_INTERVAL` frames, YOLO runs on the current frame.
+
+The system ignores detections belonging to unrelated classes.
+
+It then calculates IoU between the CSRT bounding box and the best matching YOLO detection.
+
+### 5. Verification Failure Handling
+
+When the IoU is below the configured threshold, the verification failure counter is increased.
+
+When verification succeeds, the counter is reset.
+
+This prevents a single temporary detection failure from immediately triggering recovery.
+
+### 6. Tracker Recovery
+
+After three consecutive verification failures, the system attempts to recover the tracker.
+
+If a valid YOLO detection is available, CSRT is reinitialized using that detection's bounding box.
+
+This allows the system to recover from temporary tracking drift or loss.
+
+## Configuration
+
+The main tracking parameters are defined at the beginning of `main.py`:
+
+```python
+YOLO_INTERVAL = 10
+YOLO_CONFIDENCE = 0.40
+IOU_THRESHOLD = 0.30
+MAX_VERIFICATION_FAILURES = 3
+```
+
+| Parameter                   | Description                                      |
+| --------------------------- | ------------------------------------------------ |
+| `YOLO_INTERVAL`             | Number of frames between YOLO verification runs  |
+| `YOLO_CONFIDENCE`           | Minimum YOLO detection confidence                |
+| `IOU_THRESHOLD`             | Minimum IoU required for successful verification |
+| `MAX_VERIFICATION_FAILURES` | Number of consecutive failures before recovery   |
 
 ## Project Structure
 
@@ -198,21 +367,35 @@ state until the user manually selects a new target.
 EyeGo_Tracker/
 │
 ├── main.py
+├── association.py
 ├── yolo11n.pt
 ├── pyproject.toml
 ├── uv.lock
 ├── README.md
-├── .gitignore
+└── .gitignore
 ```
+
+### File Responsibilities
+
+| File             | Purpose                           |
+| ---------------- | --------------------------------- |
+| `main.py`        | Main webcam tracking application  |
+| `association.py` | Bounding-box IoU calculation      |
+| `yolo11n.pt`     | YOLO11n object detection model    |
+| `pyproject.toml` | Project metadata and dependencies |
+| `uv.lock`        | Locked dependency versions        |
+| `README.md`      | Project documentation             |
+| `.gitignore`     | Files excluded from Git           |
 
 ## Limitations
 
-* YOLO verification only works when the selected object belongs to a class supported by the YOLO model.
-* Arbitrary objects that are not recognized by YOLO rely mainly on CSRT and appearance verification.
-* Significant occlusion or complete disappearance of the target may cause the tracker to enter the target-lost state.
-* Appearance verification based on color histograms may be affected by major lighting changes.
+* YOLO verification depends on the classes supported by the YOLO11n model.
+* Objects that YOLO cannot recognize can still be tracked by CSRT, but YOLO verification and recovery will not be available for them.
+* CSRT can still lose the target under severe occlusion or rapid movement.
+* Recovery depends on YOLO successfully detecting the original target class.
+* The current implementation uses IoU as the main association method and does not perform advanced visual re-identification.
 
 
 ## License
 
-This project was developed as part of the **EyeGo object tracking coding task**.
+This project was developed as part of the **EyeGo Real-Time Object Tracking Coding Task**.
